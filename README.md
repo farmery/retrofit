@@ -84,7 +84,9 @@ void main(List<String> args) {
 
 ## More
 
-### Type Conversion
+### Types
+
+## Types conversion
 
 > Before you use the type conversion, please make sure that a ` factory Task.fromJson(Map<String, dynamic> json)` must be provided for each model class. `json_serializable` is recommended to be used as the serialization tool.
 
@@ -100,6 +102,26 @@ class Task {
 
   final String name;
 }
+```
+
+## Typed extras
+If you want to add static extra to all requests.
+
+```dart
+  class MetaData extends TypedExtras {
+  final String id;
+  final String region;
+
+  const MetaData({required this.id, required region});
+}
+
+@MetaData(
+  id: '1234',
+  region: 'ng',
+)
+@GET("/get")
+Future<String> fetchData();
+
 ```
 
 ### HTTP Methods
@@ -219,6 +241,53 @@ abstract class RestClient {
 dio.options.baseUrl = 'https://5d42a6e2bc64f90014a56ca0.mockapi.io/api/v1';
 final client = RestClient(dio);
 ```
+
+### Call Adapter
+
+This feature enables custom handling of responses and errors, allowing you to intercept and adapt calls based on your needs. 
+This can be done by creating a custom adapter that extends CallAdapterInterface, then overriding either onError or onResponse depending on your useCase, then passing it to the @CallAdapter annotation or @RestApi.
+
+```dart
+class MyCallAdapter extends CallAdapterInterface<User, CustomException> {
+  @override
+  Future<CustomException> onError(error) async => CustomException(message: error.toString());
+
+  @override
+  Future<User> onResponse(dynamic data) async => User.customParsing(data);
+}
+
+// Usage 1
+// This approach applies the adapter to only the request method annotated with `@CallAdapter`
+@RestApi()
+abstract class RestClient {
+  factory RestClient(Dio dio, {String? baseUrl}) = _RestClient;
+
+  @CallAdapter(MyCallAdapter)
+  @GET('/')
+  Future<User> getTasks();
+}
+
+// Usage 2
+// This approach applies the adapter to all request methods in the api interface
+// Note that you can then override particular methods in the api interface by annotating it with `@CallAdapter`
+@RestApi(callAdapterInterface: MyCallAdapter)
+abstract class RestClient {
+  factory RestClient(Dio dio, {String? baseUrl}) = _RestClient;
+
+  @GET('/')
+  Future<User> getTasks();
+
+  @POST('/')
+  Future<User> submitTask();
+
+  @CallAdapter(MyCallAdapter)
+  @DELETE('/')
+  Future<void> deleteTask();
+}
+```
+With this, when you call these request methods your transformed response is returned. or if there's an error, your transformed error is thrown.
+
+If you want to use the base url from `dio.option.baseUrl`, which has lowest priority, please don't pass any parameter to `RestApi` annotation and `RestClient`'s structure method.
 
 ### Multiple endpoints support
 

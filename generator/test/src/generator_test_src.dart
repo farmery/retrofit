@@ -6,8 +6,8 @@ import 'package:source_gen_test/annotations.dart';
 
 import 'query.pb.dart';
 
-enum FileType { mp4, mp3 }
 
+enum FileType { mp4, mp3 }
 class DummyTypedExtras extends TypedExtras {
   final String id;
   final Map<String, dynamic> config;

@@ -1,6 +1,5 @@
 import 'dart:ffi';
 import 'dart:io';
-
 import 'package:analyzer/dart/constant/value.dart';
 import 'package:analyzer/dart/element/element.dart';
 import 'package:analyzer/dart/element/nullability_suffix.dart';
@@ -51,6 +50,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
   static const String _errorLoggerVar = 'errorLogger';
   static const _queryParamsVar = 'queryParameters';
   static const _optionsVar = '_options';
+  static const _callAdapterVar = '_callAdapter';
   static const _localHeadersVar = '_headers';
   static const _headersVar = 'headers';
   static const _dataVar = 'data';
@@ -71,6 +71,8 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
 
   /// Annotation details for [retrofit.RestApi]
   late retrofit.RestApi clientAnnotation;
+
+  ConstantReader? clientAnnotationConstantReader;
 
   @override
   String generateForAnnotatedElement(
@@ -97,6 +99,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
       baseUrl: annotation?.peek(_baseUrlVar)?.stringValue ?? '',
       parser: parser ?? retrofit.Parser.JsonSerializable,
     );
+    clientAnnotationConstantReader = annotation;
     final baseUrl = clientAnnotation.baseUrl;
     final annotateClassConsts = element.constructors
         .where((c) => !c.isFactory && !c.isDefaultConstructor);
@@ -223,15 +226,39 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
         }
       });
 
-  Iterable<Method> _parseMethods(ClassElement element) => <MethodElement>[
-        ...element.methods,
-        ...element.mixins.expand((i) => i.methods),
-      ].where((m) {
-        final methodAnnotation = _getMethodAnnotation(m);
-        return methodAnnotation != null &&
-            m.isAbstract &&
-            (m.returnType.isDartAsyncFuture || m.returnType.isDartAsyncStream);
-      }).map((m) => _generateMethod(m)!);
+
+  ConstantReader? getCallAdapterAnnotation(MethodElement m) {
+    final requestCallAdapterAnnotation = _typeChecker(retrofit.CallAdapter)
+        .firstAnnotationOf(m)
+        .toConstantReader();
+    final rootCallAdapter = clientAnnotationConstantReader;
+
+    final callAdapter = (requestCallAdapterAnnotation ?? rootCallAdapter)
+        ?.peek('callAdapterInterface');
+    // final callAdapterName = callAdapter?.typeValue.getDisplayString();
+    return callAdapter;
+  }
+
+  Iterable<Method> _parseMethods(ClassElement element) {
+    List<Method> methods = [];
+    final methodMembers = <MethodElement>[
+      ...element.methods,
+      ...element.mixins.expand((i) => i.methods),
+    ];
+    for (final method in methodMembers) {
+      final callAdapterAnnotation = getCallAdapterAnnotation(method);
+      final isFutureOrStream = method.returnType.isDartAsyncFuture || method.returnType.isDartAsyncStream;
+      if (isFutureOrStream && callAdapterAnnotation == null) {
+        methods.add(_generateMethod(method)!);
+      } else {
+        methods.add(_generateMethod(method)!);
+        // add adapter method
+      }
+    }
+    return methods;
+  }
+
+  Method generateAdapterMethod() {}
 
   String _generateTypeParameterizedName(TypeParameterizedElement element) =>
       element.displayName +
@@ -370,24 +397,32 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
   }
 
   Method? _generateMethod(MethodElement m) {
+    final callAdapterAnnotation = getCallAdapterAnnotation(m);
+    final hasCallAdapter = callAdapterAnnotation != null;
+    final callAdapterObjectVal = callAdapterAnnotation?.typeValue as InterfaceType?;
+    final originalCallReturnType = callAdapterObjectVal?.superclass?.typeArguments.firstOrNull;
+    if (hasCallAdapter && originalCallReturnType == null) {
+      throw Exception("Missing type arguments on CallAdapterInterface<T, R>");
+    }
     final httpMethod = _getMethodAnnotation(m);
     if (httpMethod == null) {
       return null;
     }
 
     return Method((mm) {
+      final returnType = hasCallAdapter? originalCallReturnType : m.returnType;
       mm
-        ..returns =
-            refer(_displayString(m.type.returnType, withNullability: true))
-        ..name = m.displayName
+        ..returns = refer(_displayString(returnType, withNullability: true))
+        ..name = hasCallAdapter? '_${m.displayName}' : m.displayName
         ..types.addAll(m.typeParameters.map((e) => refer(e.name)))
-        ..modifier = m.returnType.isDartAsyncFuture
+        ..modifier = returnType!.isDartAsyncFuture
             ? MethodModifier.async
-            : MethodModifier.asyncStar
-        ..annotations.add(const CodeExpression(Code('override')));
+            : MethodModifier.asyncStar;
+        if (!hasCallAdapter) {
+          mm.annotations.add(const CodeExpression(Code('override')));
+        }
 
       if (globalOptions.useResult ?? false) {
-        final returnType = m.returnType;
         if (returnType is ParameterizedType &&
             returnType.typeArguments.first is! VoidType) {
           mm.annotations.add(const CodeExpression(Code('useResult')));
@@ -423,7 +458,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
               ),
             ),
       );
-      mm.body = _generateRequest(m, httpMethod);
+      mm.body = _generateRequest(returnType, m, httpMethod);
     });
   }
 
@@ -440,9 +475,9 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
     return literal(definePath);
   }
 
-  Code _generateRequest(MethodElement m, ConstantReader httpMethod) {
+  Code _generateRequest(DartType methodReturnType, MethodElement m, ConstantReader httpMethod) {
     final returnAsyncWrapper =
-        m.returnType.isDartAsyncFuture ? 'return' : 'yield';
+        methodReturnType.isDartAsyncFuture ? 'return' : 'yield';
     final path = _generatePath(m, httpMethod);
     final blocks = <Code>[];
 
@@ -592,6 +627,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
       }
     } else {
       final innerReturnType = _getResponseInnerType(returnType);
+      // if the type is a list
       if (_typeChecker(List).isExactlyType(returnType) ||
           _typeChecker(BuiltList).isExactlyType(returnType)) {
         if (_isBasicType(innerReturnType)) {
@@ -699,6 +735,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
             );
           }
         }
+        // if the type is a Map
       } else if (_typeChecker(Map).isExactlyType(returnType) ||
           _typeChecker(BuiltMap).isExactlyType(returnType)) {
         final types = _getResponseInnerTypes(returnType)!;
@@ -882,6 +919,7 @@ You should create a new class to encapsulate the response.
           blocks.add(const Code('final $_valueVar = $_resultVar.data!;'));
         }
       } else {
+        // if the type is neither a map
         if (_isBasicType(returnType)) {
           blocks.add(
             declareFinal(_resultVar)
@@ -926,6 +964,7 @@ You should create a new class to encapsulate the response.
               ),
             );
         } else {
+          // if the return type is a custom type
           final fetchType = returnType.isNullable
               ? 'Map<String,dynamic>?'
               : 'Map<String,dynamic>';
@@ -2452,7 +2491,7 @@ ${bodyName.displayName} == null
           late: true,
         ).statement,
         const Code('try {'),
-        child,
+          child,
         const Code('} on Object catch (e, s) {'),
         const Code('$_errorLoggerVar?.logError(e, s, $_optionsVar);'),
         const Code('rethrow;'),
@@ -2633,6 +2672,11 @@ extension DartTypeExt on DartType {
 extension DartObjectX on DartObject? {
   bool get isEnum {
     return this?.type?.element?.kind.name == 'ENUM';
+  }
+
+  ConstantReader? toConstantReader() {
+    if (this == null) return null;
+    return ConstantReader(this);
   }
 }
 
